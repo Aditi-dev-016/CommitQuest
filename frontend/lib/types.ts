@@ -170,7 +170,7 @@ export interface WorldRegion {
 export interface DashboardData {
   contributor: Contributor
   active_quests: QuestWithProgress[]
-  recommended_repos: (Repository & { analysis?: Pick<RepositoryAnalysis, 'beginner_score'> })[]
+  recommended_repos: (Repository & { analysis?: Pick<RepositoryAnalysis, 'beginner_score' | 'tech_stack'> })[]
   recent_achievements: Achievement[]
   world_map: WorldRegion[]
 }
