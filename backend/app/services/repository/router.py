@@ -2,14 +2,10 @@ import re
 import json
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
-from app.redis_client import get_redis
 from app.services.auth.dependencies import get_current_contributor
-from app.services.contributor.models import Contributor
-from app.services.contributor.schemas import ContributorOut
-from app.services.repository.analyzer import parse_github_url, run_analysis, CACHE_TTL_SECONDS
+from app.services.repository.analyzer import parse_github_url, run_analysis
+from app.firebase import get_firestore_client
 
 router = APIRouter()
 
@@ -20,33 +16,27 @@ class AnalyzeRequest(BaseModel):
     url: str
 
 
-def _cache_key(owner: str, repo: str) -> str:
-    return f"repo_analysis:{owner.lower()}:{repo.lower()}"
-
-
 @router.post("/analyze", response_model=dict)
 async def submit_analysis(
     body: AnalyzeRequest,
     background_tasks: BackgroundTasks,
-    contributor: Contributor = Depends(get_current_contributor),
-    db: AsyncSession = Depends(get_db),
+    contributor: dict = Depends(get_current_contributor),
 ):
     parsed = parse_github_url(body.url)
     if not parsed:
         raise HTTPException(status_code=422, detail="Invalid GitHub repository URL. Expected: https://github.com/owner/repo")
 
     owner, repo = parsed
-    redis = get_redis()
-    key   = _cache_key(owner, repo)
+    db = get_firestore_client()
+    doc_id = f"{owner}__{repo}".lower()
+    doc_ref = db.collection("repository_analyses").document(doc_id)
+    doc_snap = doc_ref.get()
 
-    cached = await redis.get(key)
-    if cached:
+    if doc_snap.exists:
         return {"data": {"job_id": None, "cached": True}}
 
-    # Use a simple job_id based on owner/repo for polling
     job_id = f"{owner}__{repo}"
-    # Run in background
-    background_tasks.add_task(_run_and_cache, owner, repo, key, redis)
+    background_tasks.add_task(_run_and_save_to_firestore, owner, repo, doc_id)
 
     return {"data": {"job_id": job_id, "cached": False}}
 
@@ -55,15 +45,14 @@ async def submit_analysis(
 async def poll_analysis(
     owner: str,
     repo: str,
-    contributor: Contributor = Depends(get_current_contributor),
+    contributor: dict = Depends(get_current_contributor),
 ):
-    redis  = get_redis()
-    key    = _cache_key(owner, repo)
-    cached = await redis.get(key)
+    db = get_firestore_client()
+    doc_id = f"{owner}__{repo}".lower()
+    doc_snap = db.collection("repository_analyses").document(doc_id).get()
 
-    if cached:
-        result = json.loads(cached)
-        return {"data": {"status": "complete", "result": result}}
+    if doc_snap.exists:
+        return {"data": {"status": "complete", "result": doc_snap.to_dict()}}
 
     return {"data": {"status": "processing", "result": None}}
 
@@ -72,38 +61,49 @@ async def poll_analysis(
 async def get_report(
     owner: str,
     repo: str,
-    contributor: Contributor = Depends(get_current_contributor),
+    contributor: dict = Depends(get_current_contributor),
 ):
-    redis  = get_redis()
-    key    = _cache_key(owner, repo)
-    cached = await redis.get(key)
+    db = get_firestore_client()
+    doc_id = f"{owner}__{repo}".lower()
+    doc_snap = db.collection("repository_analyses").document(doc_id).get()
 
-    if not cached:
+    if not doc_snap.exists:
         raise HTTPException(status_code=404, detail="Report not found. Submit for analysis first.")
 
-    return {"data": json.loads(cached)}
+    return {"data": doc_snap.to_dict()}
 
 
 @router.get("/dashboard", response_model=dict)
 async def get_dashboard(
-    contributor: Contributor = Depends(get_current_contributor),
-    db: AsyncSession = Depends(get_db),
+    contributor: dict = Depends(get_current_contributor),
 ):
+    # Fallback endpoint
     return {
         "data": {
-            "contributor":        ContributorOut.model_validate(contributor),
-            "active_quests":      [],
-            "recommended_repos":  [],
-            "recent_achievements":[],
-            "world_map":          [],
+            "contributor": {
+                "id": contributor["id"],
+                "username": contributor["username"],
+                "display_name": contributor["username"],
+                "avatar_url": "",
+                "experience_level": "beginner",
+                "total_xp": 0,
+                "current_level": 1,
+                "streak_count": 0,
+                "created_at": "",
+            },
+            "active_quests": [],
+            "recommended_repos": [],
+            "recent_achievements": [],
+            "world_map": [],
         }
     }
 
 
-async def _run_and_cache(owner: str, repo: str, key: str, redis):
-    """Background task: run analysis and store in Redis."""
+async def _run_and_save_to_firestore(owner: str, repo: str, doc_id: str):
+    """Background task: run analysis and save directly to Cloud Firestore."""
     try:
         result = await run_analysis(owner, repo)
-        await redis.setex(key, CACHE_TTL_SECONDS, json.dumps(result))
+        db = get_firestore_client()
+        db.collection("repository_analyses").document(doc_id).set(result)
     except Exception:
-        pass  # Analysis failed silently; polling will keep returning 'processing'
+        pass
