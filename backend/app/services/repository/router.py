@@ -99,11 +99,35 @@ async def get_dashboard(
     }
 
 
+from app.integrations.github.client import GitHubClient
+
 async def _run_and_save_to_firestore(owner: str, repo: str, doc_id: str):
     """Background task: run analysis and save directly to Cloud Firestore."""
     try:
         result = await run_analysis(owner, repo)
         db = get_firestore_client()
         db.collection("repository_analyses").document(doc_id).set(result)
+
+        # Save issues to Firestore issues collection
+        async with GitHubClient() as gh:
+            issues = await gh.get_issues(owner, repo, per_page=50)
+            for i in issues:
+                issue_id = str(i["id"])
+                labels = [lbl["name"] for lbl in i.get("labels", [])]
+                db.collection("issues").document(issue_id).set({
+                    "id": issue_id,
+                    "repository_id": f"{owner}/{repo}".lower(),
+                    "github_number": i["number"],
+                    "title": i["title"],
+                    "body": i.get("body", ""),
+                    "html_url": i["html_url"],
+                    "state": i["state"],
+                    "labels": labels,
+                    "difficulty": "easy" if any("easy" in l.lower() or "good" in l.lower() for l in labels) else "medium",
+                    "is_good_first_issue": any(l.lower() in ("good first issue", "good-first-issue") for l in labels),
+                    "is_help_wanted": any(l.lower() in ("help wanted", "help-wanted") for l in labels),
+                    "author": i["user"]["login"] if i.get("user") else "anonymous",
+                    "created_at": i.get("created_at", ""),
+                })
     except Exception:
         pass
