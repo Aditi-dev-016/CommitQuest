@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from app.services.auth.dependencies import get_current_contributor
 from app.services.repository.analyzer import parse_github_url, run_analysis
-from app.firebase import get_firestore_client
+from app.core.firebase import get_firestore_client
 
 router = APIRouter()
 
