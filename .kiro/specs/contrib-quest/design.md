@@ -912,3 +912,1251 @@ ContribQuest
 **Global:** TopNav search reaches Repository Analyzer and Issue Finder
 
 ---
+
+## 7. User Flows
+
+### 7.1 New User Onboarding Flow
+
+```
+[Visit /] 
+  → Click "Sign in with GitHub"
+  → GitHub OAuth (authorize)
+  → Callback → JWT created → new user?
+      YES → /onboarding/experience
+          → /onboarding/technologies
+          → /onboarding/goals
+          → /onboarding/review → "Start My Journey"
+          → /dashboard (first-time state: welcome modal)
+      NO  → /dashboard (returning state)
+```
+
+### 7.2 Repository Analysis Flow
+
+```
+[Dashboard or search] 
+  → Paste GitHub URL in analyzer input
+  → Click "Analyze"
+  → Validation check
+      INVALID → inline error, no API call
+      VALID →
+          Check cache (Redis)
+              HIT  → serve cached report (< 200ms)
+              MISS → call AI Service → stream progress indicator
+                   → analysis complete → store in cache (24h)
+  → Repository Intelligence Report renders
+  → Award 10 XP (if first time viewing)
+  → Click "Contribution Opportunity" → Issue Explainer
+```
+
+### 7.3 Quest Completion Flow
+
+```
+[Mission Board or Dashboard]
+  → Click "START QUEST" on QuestCard
+  → Quest state: Active
+  → User completes quest objectives (varies by quest type):
+      • Explore repo → Repository Explorer opened
+      • Read lesson  → Learning Academy lesson completed
+      • Submit PR    → PR URL submitted and validated
+  → System detects completion
+  → Quest marked Complete
+  → XP awarded (animated)
+  → Achievement check triggered
+      → New achievement? → Toast notification + badge glow
+  → Daily challenge streak check
+      → All daily challenges done? → Streak +1
+```
+
+### 7.4 Issue Discovery → PR Submission Flow
+
+```
+[Issue Finder / Repository Intelligence]
+  → Select issue → Issue Explainer
+  → AI generates plain-English explanation
+  → Click "Start Contributing"
+      → Quest created & added to Active Quests
+      → First PR Assistant opened
+  → Step 1: Fork & Clone (with repo-specific git commands)
+  → Step 2: Create Branch
+  → Step 3: Make Changes
+  → Step 4: Commit
+  → Step 5: Push
+  → Step 6: Open PR → Paste PR URL → Validate
+      → +150 XP awarded
+      → Quest status: "Submitted"
+  → (async) GitHub webhook / polling checks PR merge
+      → PR Merged → +300 XP → "Merged PR" achievement check
+      → PR Closed (no merge) → notification + option to retry
+```
+
+### 7.5 Guild Discovery → Join Flow
+
+```
+[Sidebar: Guild Hall]
+  → Guild Discovery page
+  → Browse featured guilds
+  → Click guild card → right detail panel opens
+  → Click "Join Guild"
+      → Confirmation (if first guild: welcome message)
+      → Added to guild member list
+      → Guild appears in sidebar
+  → Access guild discussion board
+  → Post message → +community XP on helpful replies
+```
+
+### 7.6 Learning Path Completion Flow
+
+```
+[Learning Academy]
+  → Choose Learning Path (e.g., GitHub Workflow)
+  → Click active lesson
+  → Read article / watch video / take quiz
+      → Quiz: answer questions
+          WRONG → show correct answer + explanation → retry
+          RIGHT → proceed to next question
+  → Lesson complete → +20 XP
+  → Progress bar updates
+  → All lessons in path complete?
+      YES → Path Certificate awarded → region unlocked on World Map
+            → Certificate downloadable/shareable
+      NO  → Next lesson unlocked
+```
+
+---
+
+## 8. State Management Plan
+
+### 8.1 Technology
+
+**React Query (TanStack Query)** for all server state (API data, caching, background refetch)  
+**Zustand** for client state (UI state, session, toast queue, map interactions)  
+**React Context** for theming only
+
+### 8.2 Server State (React Query)
+
+```typescript
+// Query keys
+const queryKeys = {
+  user:           ['user'],
+  dashboard:      ['dashboard'],
+  repos:          ['repos'],
+  repoAnalysis:   (url: string) => ['repos', 'analysis', url],
+  repoExplorer:   (owner: string, repo: string) => ['repos', 'explorer', owner, repo],
+  issues:         (filters: IssueFilters) => ['issues', filters],
+  issue:          (id: string) => ['issues', id],
+  issueExplain:   (id: string) => ['issues', id, 'explain'],
+  quests:         ['quests'],
+  quest:          (id: string) => ['quests', id],
+  achievements:   ['achievements'],
+  guilds:         ['guilds'],
+  guild:          (id: string) => ['guilds', id],
+  learningPaths:  ['academy', 'paths'],
+  lessons:        (pathId: string) => ['academy', 'paths', pathId, 'lessons'],
+  profile:        (username: string) => ['profile', username],
+}
+
+// Cache times
+const cacheConfig = {
+  repoAnalysis:    24 * 60 * 60 * 1000,  // 24h (mirrors Redis TTL)
+  issueExplain:    60 * 60 * 1000,        // 1h
+  guilds:          5 * 60 * 1000,         // 5m
+  dashboard:       2 * 60 * 1000,         // 2m (XP/streak need freshness)
+  issues:          10 * 60 * 1000,        // 10m
+}
+```
+
+### 8.3 Client State (Zustand)
+
+```typescript
+interface AppStore {
+  // Session
+  user: Contributor | null;
+  setUser: (user: Contributor | null) => void;
+
+  // XP animation
+  pendingXP: number;
+  addPendingXP: (xp: number) => void;
+  clearPendingXP: () => void;
+
+  // Toast queue
+  toasts: Toast[];
+  addToast: (toast: Toast) => void;
+  removeToast: (id: string) => void;
+
+  // Map interactions (Repository Explorer)
+  selectedNodeId: string | null;
+  setSelectedNode: (id: string | null) => void;
+  mapViewport: { x: number; y: number; scale: number };
+  setMapViewport: (viewport: MapViewport) => void;
+
+  // Sidebar
+  sidebarCollapsed: boolean;
+  toggleSidebar: () => void;
+
+  // Active quest context
+  activeQuestIssue: Issue | null;
+  setActiveQuestIssue: (issue: Issue | null) => void;
+}
+```
+
+### 8.4 Optimistic Updates
+
+Applied to:
+- Quest start/complete (quest status update before server confirmation)
+- Achievement unlock display (show toast immediately on client trigger)
+- XP balance (increment locally, reconcile on next dashboard fetch)
+- Guild join (add user to member list immediately)
+
+---
+
+## 9. System Architecture
+
+### 9.1 High-Level Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                         CLIENT LAYER                              │
+│   Next.js 14 (App Router) · TypeScript · Tailwind · Framer Motion│
+│   React Query · Zustand · ShadCN UI                              │
+└─────────────────────────┬────────────────────────────────────────┘
+                          │ HTTPS / WebSocket
+┌─────────────────────────▼────────────────────────────────────────┐
+│                        API GATEWAY                                │
+│              (FastAPI + Nginx reverse proxy)                       │
+│         Rate limiting · JWT validation · Request routing          │
+└──┬─────────────┬──────────────┬──────────────┬───────────────────┘
+   │             │              │              │
+┌──▼──┐    ┌────▼───┐    ┌─────▼────┐   ┌────▼──────┐
+│Auth │    │ User   │    │  GitHub  │   │    AI     │
+│Svc  │    │  Svc   │    │  Int Svc │   │   Svc     │
+└──┬──┘    └────┬───┘    └─────┬────┘   └────┬──────┘
+   │            │              │             │
+┌──▼────────────▼──────────────▼─────────────▼──────┐
+│              PostgreSQL (primary database)          │
+│              Redis (cache + job queue)              │
+│              Celery Workers (background tasks)      │
+└────────────────────────────────────────────────────┘
+                          │
+┌─────────────────────────▼────────────────────────────────────────┐
+│                     EXTERNAL SERVICES                              │
+│   GitHub API  ·  GitHub OAuth  ·  Gemini API  ·  AWS S3           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 9.2 Microservices Breakdown
+
+| Service | Responsibility | Tech |
+|---------|---------------|------|
+| **Auth Service** | GitHub OAuth, JWT issue/refresh/revoke | FastAPI |
+| **User Service** | Profile CRUD, XP/level updates, achievement checks | FastAPI |
+| **GitHub Integration Service** | Repository metadata, issues, webhooks, PR status | FastAPI + httpx |
+| **AI Service** | Gemini API calls, prompt engineering, response streaming | FastAPI + asyncio |
+| **Repository Analysis Service** | Orchestrates GitHub + AI calls, caches results | FastAPI + Celery |
+| **Issue Analysis Service** | Issue explanation generation, context gathering | FastAPI + Celery |
+| **Gamification Service** | Quest tracking, XP calculation, streak management | FastAPI |
+| **Learning Service** | Lesson delivery, progress tracking, certificate generation | FastAPI |
+| **Guild Service** | Guild CRUD, discussions, events | FastAPI |
+| **Notification Service** | In-app toasts, email, WebSocket push | FastAPI + Redis Pub/Sub |
+
+### 9.3 Data Flow — Repository Analysis
+
+```
+1. Client POST /api/analyze { url }
+2. API Gateway → Repository Analysis Service
+3. Check Redis cache (key: repo_analysis:{owner}:{repo})
+   HIT  → return cached JSON (200ms)
+   MISS → enqueue Celery task
+4. Celery Worker:
+   a. Fetch repo metadata (GitHub API)
+   b. Fetch open issues (GitHub API, paginated)
+   c. Build AI prompt with repo data
+   d. Call Gemini API (streaming)
+   e. Parse AI response → structured JSON
+   f. Compute composite Beginner Friendliness Score
+   g. Store in PostgreSQL (RepositoryAnalysis table)
+   h. Store in Redis with 24h TTL
+5. Return via polling or SSE stream to client
+6. Gamification Service: award 10 XP to user
+```
+
+---
+
+## 10. Database Schema
+
+### 10.1 Core Tables
+
+```sql
+-- Users / Contributors
+CREATE TABLE contributors (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  github_id     BIGINT UNIQUE NOT NULL,
+  username      VARCHAR(64) UNIQUE NOT NULL,
+  display_name  VARCHAR(128),
+  email         VARCHAR(255),
+  avatar_url    VARCHAR(512),
+  bio           TEXT,
+  github_url    VARCHAR(512),
+  experience_level VARCHAR(32) CHECK (experience_level IN ('beginner','intermediate','advanced','maintainer')),
+  total_xp      INTEGER NOT NULL DEFAULT 0,
+  current_level INTEGER NOT NULL DEFAULT 1,
+  streak_count  INTEGER NOT NULL DEFAULT 0,
+  last_active_date DATE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Skills
+CREATE TABLE skills (
+  id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name  VARCHAR(64) UNIQUE NOT NULL,
+  category VARCHAR(32) -- 'language','framework','tool','concept'
+);
+
+CREATE TABLE contributor_skills (
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  skill_id       UUID REFERENCES skills(id) ON DELETE CASCADE,
+  proficiency    SMALLINT CHECK (proficiency BETWEEN 1 AND 5),
+  PRIMARY KEY (contributor_id, skill_id)
+);
+
+-- Contribution Goals
+CREATE TABLE contributor_goals (
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  goal           VARCHAR(64) NOT NULL,
+  PRIMARY KEY (contributor_id, goal)
+);
+
+-- Repositories
+CREATE TABLE repositories (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  github_id    BIGINT UNIQUE NOT NULL,
+  owner        VARCHAR(128) NOT NULL,
+  name         VARCHAR(128) NOT NULL,
+  full_name    VARCHAR(256) UNIQUE NOT NULL,
+  description  TEXT,
+  html_url     VARCHAR(512),
+  primary_language VARCHAR(64),
+  star_count   INTEGER DEFAULT 0,
+  fork_count   INTEGER DEFAULT 0,
+  open_issue_count INTEGER DEFAULT 0,
+  is_archived  BOOLEAN DEFAULT FALSE,
+  last_pushed_at TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Repository Analysis (AI output)
+CREATE TABLE repository_analyses (
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  repository_id          UUID REFERENCES repositories(id) ON DELETE CASCADE,
+  beginner_score         SMALLINT CHECK (beginner_score BETWEEN 0 AND 100),
+  documentation_score    SMALLINT CHECK (documentation_score BETWEEN 0 AND 100),
+  complexity_score       SMALLINT CHECK (complexity_score BETWEEN 0 AND 100),
+  setup_difficulty_score SMALLINT CHECK (setup_difficulty_score BETWEEN 0 AND 100),
+  community_score        SMALLINT CHECK (community_score BETWEEN 0 AND 100),
+  summary_text           TEXT,
+  architecture_json      JSONB,  -- node graph data
+  tech_stack             VARCHAR(64)[],
+  good_first_issue_count INTEGER DEFAULT 0,
+  help_wanted_count      INTEGER DEFAULT 0,
+  analysis_version       SMALLINT NOT NULL DEFAULT 1,
+  expires_at             TIMESTAMPTZ NOT NULL,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Issues
+CREATE TABLE issues (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  repository_id UUID REFERENCES repositories(id) ON DELETE CASCADE,
+  github_number INTEGER NOT NULL,
+  title         VARCHAR(512) NOT NULL,
+  body          TEXT,
+  html_url      VARCHAR(512),
+  state         VARCHAR(16) CHECK (state IN ('open','closed')),
+  labels        VARCHAR(64)[],
+  difficulty    VARCHAR(16) CHECK (difficulty IN ('easy','medium','hard','unknown')),
+  is_good_first_issue BOOLEAN DEFAULT FALSE,
+  is_help_wanted BOOLEAN DEFAULT FALSE,
+  author        VARCHAR(128),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (repository_id, github_number)
+);
+
+-- Issue Analysis (AI explanations)
+CREATE TABLE issue_analyses (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  issue_id        UUID REFERENCES issues(id) ON DELETE CASCADE,
+  plain_english   TEXT,
+  required_concepts TEXT[],
+  skills_needed   VARCHAR(64)[],
+  files_involved  VARCHAR(512)[],
+  suggested_steps TEXT,
+  resources       JSONB,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Quests
+CREATE TABLE quests (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  type            VARCHAR(32) CHECK (type IN ('daily','standard','featured','milestone')),
+  category        VARCHAR(32) CHECK (category IN ('explore','read','code','review','community')),
+  title           VARCHAR(256) NOT NULL,
+  description     TEXT,
+  difficulty      VARCHAR(16) CHECK (difficulty IN ('easy','medium','hard')),
+  xp_reward       INTEGER NOT NULL DEFAULT 0,
+  prerequisite_id UUID REFERENCES quests(id),
+  issue_id        UUID REFERENCES issues(id),
+  repository_id   UUID REFERENCES repositories(id),
+  active_from     TIMESTAMPTZ,
+  active_until    TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Quest Progress (per contributor)
+CREATE TABLE quest_progress (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  quest_id       UUID REFERENCES quests(id) ON DELETE CASCADE,
+  status         VARCHAR(32) CHECK (status IN ('locked','available','active','submitted','complete','failed')),
+  pr_url         VARCHAR(512),
+  completed_at   TIMESTAMPTZ,
+  xp_awarded     INTEGER,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (contributor_id, quest_id)
+);
+
+-- Achievements
+CREATE TABLE achievements (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug            VARCHAR(64) UNIQUE NOT NULL,
+  name            VARCHAR(128) NOT NULL,
+  description     TEXT,
+  icon_url        VARCHAR(512),
+  tier            VARCHAR(16) CHECK (tier IN ('bronze','silver','gold','legendary')),
+  xp_reward       INTEGER DEFAULT 0,
+  unlock_condition JSONB NOT NULL  -- e.g., {"type": "pr_merged_count", "threshold": 1}
+);
+
+CREATE TABLE contributor_achievements (
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  achievement_id UUID REFERENCES achievements(id) ON DELETE CASCADE,
+  unlocked_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (contributor_id, achievement_id)
+);
+
+-- Guilds
+CREATE TABLE guilds (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug        VARCHAR(64) UNIQUE NOT NULL,
+  name        VARCHAR(128) NOT NULL,
+  description TEXT,
+  specialty   VARCHAR(64),
+  tags        VARCHAR(64)[],
+  icon_url    VARCHAR(512),
+  tier        VARCHAR(16) CHECK (tier IN ('active','high_activity','steady','new')),
+  member_count INTEGER DEFAULT 0,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE guild_members (
+  guild_id       UUID REFERENCES guilds(id) ON DELETE CASCADE,
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  role           VARCHAR(32) CHECK (role IN ('member','moderator','leader')),
+  joined_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (guild_id, contributor_id)
+);
+
+CREATE TABLE guild_messages (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  guild_id       UUID REFERENCES guilds(id) ON DELETE CASCADE,
+  contributor_id UUID REFERENCES contributors(id) ON DELETE SET NULL,
+  body           TEXT NOT NULL,
+  reactions      JSONB DEFAULT '{}',
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Learning Paths & Lessons
+CREATE TABLE learning_paths (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug        VARCHAR(64) UNIQUE NOT NULL,
+  title       VARCHAR(128) NOT NULL,
+  description TEXT,
+  region      VARCHAR(64), -- maps to world map region
+  order_index SMALLINT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE lessons (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  path_id        UUID REFERENCES learning_paths(id) ON DELETE CASCADE,
+  title          VARCHAR(256) NOT NULL,
+  type           VARCHAR(16) CHECK (type IN ('article','video','quiz')),
+  content        TEXT,       -- HTML or markdown for article/video embed
+  quiz_data      JSONB,      -- array of {question, options, correct_index, explanation}
+  xp_reward      INTEGER NOT NULL DEFAULT 20,
+  order_index    SMALLINT NOT NULL,
+  duration_mins  SMALLINT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE lesson_progress (
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  lesson_id      UUID REFERENCES lessons(id) ON DELETE CASCADE,
+  completed_at   TIMESTAMPTZ,
+  quiz_score     SMALLINT,
+  xp_awarded     INTEGER,
+  PRIMARY KEY (contributor_id, lesson_id)
+);
+
+-- Contribution History
+CREATE TABLE contribution_history (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  event_type     VARCHAR(64) NOT NULL, -- 'pr_submitted','pr_merged','issue_solved','lesson_complete',etc.
+  xp_earned      INTEGER DEFAULT 0,
+  metadata       JSONB,
+  occurred_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Repository Bookmarks
+CREATE TABLE repository_bookmarks (
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  repository_id  UUID REFERENCES repositories(id) ON DELETE CASCADE,
+  bookmarked_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (contributor_id, repository_id)
+);
+
+-- Notifications
+CREATE TABLE notifications (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  contributor_id UUID REFERENCES contributors(id) ON DELETE CASCADE,
+  type           VARCHAR(64) NOT NULL,
+  title          VARCHAR(256),
+  body           TEXT,
+  metadata       JSONB,
+  read_at        TIMESTAMPTZ,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Activity Logs (audit)
+CREATE TABLE activity_logs (
+  id             BIGSERIAL PRIMARY KEY,
+  contributor_id UUID REFERENCES contributors(id) ON DELETE SET NULL,
+  action         VARCHAR(128) NOT NULL,
+  resource_type  VARCHAR(64),
+  resource_id    UUID,
+  ip_address     INET,
+  user_agent     TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX idx_quest_progress_contributor ON quest_progress (contributor_id);
+CREATE INDEX idx_quest_progress_status ON quest_progress (status);
+CREATE INDEX idx_issues_repo ON issues (repository_id);
+CREATE INDEX idx_issues_difficulty ON issues (difficulty);
+CREATE INDEX idx_issues_labels ON issues USING GIN (labels);
+CREATE INDEX idx_contribution_history_contributor ON contribution_history (contributor_id);
+CREATE INDEX idx_notifications_contributor_unread ON notifications (contributor_id) WHERE read_at IS NULL;
+CREATE INDEX idx_activity_logs_created ON activity_logs (created_at DESC);
+```
+
+---
+
+## 11. API Specifications
+
+### 11.1 Base URL
+
+```
+https://api.contribquest.io/v1
+```
+
+All endpoints require `Authorization: Bearer {jwt}` except auth endpoints.  
+Response format: `{ data: T, meta?: PaginationMeta, error?: ApiError }`
+
+### 11.2 Authentication
+
+```
+POST /auth/github/callback
+Body: { code: string, state: string }
+Response: { data: { token: string, contributor: Contributor } }
+
+POST /auth/refresh
+Response: { data: { token: string } }
+
+POST /auth/logout
+Response: 204 No Content
+```
+
+### 11.3 Contributor
+
+```
+GET  /contributors/me
+Response: { data: Contributor }
+
+PATCH /contributors/me
+Body: { display_name?, bio?, goals? }
+Response: { data: Contributor }
+
+GET  /contributors/{username}
+Response: { data: PublicContributor }
+
+GET  /contributors/me/achievements
+Response: { data: Achievement[], meta: { total, unlocked } }
+
+GET  /contributors/me/stats
+Response: { data: ContributorStats }
+```
+
+### 11.4 Dashboard
+
+```
+GET /dashboard
+Response: {
+  data: {
+    contributor: HeroCard,
+    active_quests: Quest[],        // max 3
+    recommended_repos: Repo[],     // max 4
+    recent_achievements: Achievement[], // max 3
+    world_map: WorldRegion[]
+  }
+}
+```
+
+### 11.5 Repository Analysis
+
+```
+POST /analyze
+Body: { url: string }
+Response: {
+  data: {
+    job_id: string,
+    cached: boolean
+  }
+}
+
+GET /analyze/{job_id}
+Response: {
+  data: {
+    status: 'pending' | 'processing' | 'complete' | 'error',
+    result?: RepositoryIntelligenceReport
+  }
+}
+
+GET /analyze/report/{owner}/{repo}
+Response: { data: RepositoryIntelligenceReport }
+// Serves cached report if available
+```
+
+### 11.6 Issues
+
+```
+GET /issues?language=&difficulty=&label=&repo=&page=&per_page=
+Response: { data: Issue[], meta: PaginationMeta }
+
+GET /issues/{id}
+Response: { data: IssueDetail }
+
+GET /issues/{id}/explain
+Response: { data: IssueExplanation }
+// Streams via SSE: text/event-stream
+```
+
+### 11.7 Quests
+
+```
+GET /quests?type=&status=&page=
+Response: { data: Quest[], meta: PaginationMeta }
+
+GET /quests/{id}
+Response: { data: QuestDetail }
+
+POST /quests/{id}/start
+Response: { data: QuestProgress }
+
+POST /quests/{id}/submit
+Body: { pr_url?: string }
+Response: { data: QuestProgress, xp_awarded: number, achievements_unlocked: Achievement[] }
+```
+
+### 11.8 Learning Academy
+
+```
+GET /academy/paths
+Response: { data: LearningPath[] }
+
+GET /academy/paths/{path_id}
+Response: { data: LearningPathDetail }
+
+GET /academy/paths/{path_id}/lessons
+Response: { data: Lesson[] }
+
+POST /academy/lessons/{lesson_id}/complete
+Body: { quiz_answers?: number[] }
+Response: { data: LessonProgress, xp_awarded: number }
+```
+
+### 11.9 Guilds
+
+```
+GET /guilds?q=&tag=&sort=trending|new|activity
+Response: { data: Guild[], meta: PaginationMeta }
+
+GET /guilds/{id}
+Response: { data: GuildDetail }
+
+POST /guilds/{id}/join
+Response: { data: GuildMember }
+
+GET /guilds/{id}/messages?page=
+Response: { data: GuildMessage[], meta: PaginationMeta }
+
+POST /guilds/{id}/messages
+Body: { body: string }
+Response: { data: GuildMessage }
+```
+
+### 11.10 XP & Gamification
+
+```
+GET /gamification/xp-log?page=
+Response: { data: XPEntry[], meta: PaginationMeta }
+
+GET /gamification/leaderboard?scope=global|guild&guild_id=
+Response: { data: LeaderboardEntry[] }
+```
+
+---
+
+## 12. Backend Folder Structure
+
+```
+backend/
+├── app/
+│   ├── main.py                    # FastAPI app factory
+│   ├── config.py                  # Settings (pydantic BaseSettings)
+│   ├── database.py                # SQLAlchemy async engine + session
+│   ├── redis_client.py            # Redis connection pool
+│   ├── celery_app.py              # Celery configuration
+│   │
+│   ├── services/
+│   │   ├── auth/
+│   │   │   ├── router.py
+│   │   │   ├── service.py         # OAuth flow, JWT sign/verify
+│   │   │   ├── schemas.py
+│   │   │   └── dependencies.py    # get_current_contributor
+│   │   │
+│   │   ├── contributor/
+│   │   │   ├── router.py
+│   │   │   ├── service.py
+│   │   │   ├── schemas.py
+│   │   │   └── models.py
+│   │   │
+│   │   ├── repository/
+│   │   │   ├── router.py
+│   │   │   ├── service.py
+│   │   │   ├── analyzer.py        # orchestrates GitHub + AI
+│   │   │   ├── schemas.py
+│   │   │   └── models.py
+│   │   │
+│   │   ├── explorer/
+│   │   │   ├── router.py
+│   │   │   ├── service.py         # architecture map generation
+│   │   │   ├── schemas.py
+│   │   │   └── models.py
+│   │   │
+│   │   ├── issues/
+│   │   │   ├── router.py
+│   │   │   ├── service.py
+│   │   │   ├── explainer.py       # AI issue explanation
+│   │   │   ├── schemas.py
+│   │   │   └── models.py
+│   │   │
+│   │   ├── quests/
+│   │   │   ├── router.py
+│   │   │   ├── service.py
+│   │   │   ├── daily_refresh.py   # Celery beat task
+│   │   │   ├── schemas.py
+│   │   │   └── models.py
+│   │   │
+│   │   ├── gamification/
+│   │   │   ├── router.py
+│   │   │   ├── service.py         # XP calc, level-up, streak
+│   │   │   ├── achievement_engine.py
+│   │   │   ├── schemas.py
+│   │   │   └── models.py
+│   │   │
+│   │   ├── academy/
+│   │   │   ├── router.py
+│   │   │   ├── service.py
+│   │   │   ├── certificate.py
+│   │   │   ├── schemas.py
+│   │   │   └── models.py
+│   │   │
+│   │   ├── guilds/
+│   │   │   ├── router.py
+│   │   │   ├── service.py
+│   │   │   ├── websocket.py       # real-time discussion
+│   │   │   ├── schemas.py
+│   │   │   └── models.py
+│   │   │
+│   │   └── notifications/
+│   │       ├── router.py
+│   │       ├── service.py
+│   │       ├── email.py
+│   │       └── schemas.py
+│   │
+│   ├── integrations/
+│   │   ├── github/
+│   │   │   ├── client.py          # httpx async GitHub API client
+│   │   │   ├── oauth.py
+│   │   │   ├── webhooks.py        # HMAC-SHA256 validation
+│   │   │   └── schemas.py
+│   │   │
+│   │   └── ai/
+│   │       ├── gemini_client.py
+│   │       ├── prompts/
+│   │       │   ├── repo_analysis.py
+│   │       │   ├── issue_explain.py
+│   │       │   ├── architecture.py
+│   │       │   └── learning_path.py
+│   │       └── schemas.py
+│   │
+│   ├── workers/
+│   │   ├── tasks.py               # Celery task registry
+│   │   ├── repo_analysis_task.py
+│   │   ├── issue_analysis_task.py
+│   │   ├── pr_check_task.py       # polls GitHub PR status
+│   │   └── daily_quest_task.py
+│   │
+│   ├── middleware/
+│   │   ├── rate_limit.py
+│   │   ├── audit_log.py
+│   │   └── cors.py
+│   │
+│   └── utils/
+│       ├── cache.py               # Redis cache helpers
+│       ├── pagination.py
+│       ├── security.py            # HMAC, JWT helpers
+│       └── xp_calculator.py
+│
+├── alembic/                       # Database migrations
+│   ├── versions/
+│   └── env.py
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── conftest.py
+├── pyproject.toml
+├── Dockerfile
+└── docker-compose.yml
+```
+
+---
+
+## 13. Frontend Folder Structure
+
+```
+frontend/
+├── public/
+│   ├── fonts/                     # Geist, Inter, JetBrains Mono
+│   └── icons/                     # Custom RPG SVG icons
+│
+├── src/
+│   ├── app/                       # Next.js 14 App Router
+│   │   ├── layout.tsx             # Root layout (AppShell wrapper)
+│   │   ├── page.tsx               # Landing page (/)
+│   │   ├── (auth)/
+│   │   │   ├── callback/page.tsx  # GitHub OAuth callback
+│   │   │   └── error/page.tsx
+│   │   ├── onboarding/
+│   │   │   ├── layout.tsx
+│   │   │   ├── experience/page.tsx
+│   │   │   ├── technologies/page.tsx
+│   │   │   ├── goals/page.tsx
+│   │   │   └── review/page.tsx
+│   │   ├── dashboard/
+│   │   │   └── page.tsx
+│   │   ├── analyze/
+│   │   │   └── page.tsx
+│   │   ├── explore/
+│   │   │   └── [owner]/[repo]/page.tsx
+│   │   ├── quests/
+│   │   │   ├── page.tsx           # Mission Board
+│   │   │   ├── [id]/page.tsx
+│   │   │   └── [id]/assist/page.tsx
+│   │   ├── issues/
+│   │   │   └── [id]/page.tsx
+│   │   ├── academy/
+│   │   │   ├── page.tsx
+│   │   │   ├── [pathId]/page.tsx
+│   │   │   └── [pathId]/lesson/[lessonId]/page.tsx
+│   │   ├── guilds/
+│   │   │   ├── page.tsx
+│   │   │   └── [id]/page.tsx
+│   │   ├── achievements/
+│   │   │   └── page.tsx
+│   │   └── profile/
+│   │       ├── page.tsx           # own profile
+│   │       └── [username]/page.tsx
+│   │
+│   ├── components/
+│   │   ├── layout/
+│   │   │   ├── AppShell.tsx
+│   │   │   ├── SideNavBar.tsx
+│   │   │   ├── TopNavBar.tsx
+│   │   │   ├── NavLink.tsx
+│   │   │   └── MobileDrawer.tsx
+│   │   │
+│   │   ├── ui/                    # Primitives
+│   │   │   ├── Button.tsx
+│   │   │   ├── Badge.tsx
+│   │   │   ├── TagChip.tsx
+│   │   │   ├── ProgressBar.tsx
+│   │   │   ├── StatCard.tsx
+│   │   │   ├── AvatarBadge.tsx
+│   │   │   ├── AchievementBadge.tsx
+│   │   │   ├── XPDisplay.tsx
+│   │   │   ├── NotificationToast.tsx
+│   │   │   ├── Skeleton.tsx
+│   │   │   ├── EmptyState.tsx
+│   │   │   └── ErrorCard.tsx
+│   │   │
+│   │   ├── cards/
+│   │   │   ├── QuestCard.tsx
+│   │   │   ├── FeaturedQuestCard.tsx
+│   │   │   ├── StandardQuestCard.tsx
+│   │   │   ├── RepoCard.tsx
+│   │   │   └── GuildCard.tsx
+│   │   │
+│   │   ├── dashboard/
+│   │   │   ├── HeroCard.tsx
+│   │   │   ├── WorldMap.tsx
+│   │   │   ├── WorldMapRegion.tsx
+│   │   │   ├── AchievementShowcase.tsx
+│   │   │   └── AnalyticsGrid.tsx
+│   │   │
+│   │   ├── analyze/
+│   │   │   ├── RepoSearchBar.tsx
+│   │   │   ├── RepoOverviewCard.tsx
+│   │   │   ├── BeginnerScoreCard.tsx
+│   │   │   ├── TechStackCard.tsx
+│   │   │   ├── HealthMetricsCard.tsx
+│   │   │   ├── ComplexityMeter.tsx
+│   │   │   └── ContributionOpportunities.tsx
+│   │   │
+│   │   ├── explorer/
+│   │   │   ├── ArchitectureCanvas.tsx
+│   │   │   ├── ArchitectureNode.tsx
+│   │   │   ├── NodeConnection.tsx
+│   │   │   ├── NodePopup.tsx
+│   │   │   ├── AIGuidePanel.tsx
+│   │   │   ├── FloatingControls.tsx
+│   │   │   └── RecommendedPath.tsx
+│   │   │
+│   │   ├── quests/
+│   │   │   ├── MissionBoardFilters.tsx
+│   │   │   ├── FeaturedBounties.tsx
+│   │   │   ├── StandardQuestGrid.tsx
+│   │   │   ├── DailyChallenges.tsx
+│   │   │   ├── QuestCompletionModal.tsx
+│   │   │   └── PRAssistantStepper.tsx
+│   │   │
+│   │   ├── issues/
+│   │   │   ├── IssueHeader.tsx
+│   │   │   ├── IssueExplanation.tsx
+│   │   │   └── StreamingSkeleton.tsx
+│   │   │
+│   │   ├── academy/
+│   │   │   ├── LearningPathCard.tsx
+│   │   │   ├── LessonRow.tsx
+│   │   │   ├── LessonViewer.tsx
+│   │   │   ├── QuizQuestion.tsx
+│   │   │   ├── DailyGoals.tsx
+│   │   │   └── CertificateCard.tsx
+│   │   │
+│   │   ├── guilds/
+│   │   │   ├── GuildGrid.tsx
+│   │   │   ├── GuildDetailPanel.tsx
+│   │   │   ├── ChatMessage.tsx
+│   │   │   ├── DiscussionBoard.tsx
+│   │   │   └── GuildEvents.tsx
+│   │   │
+│   │   └── profile/
+│   │       ├── ProfileHeader.tsx
+│   │       ├── StatGrid.tsx
+│   │       ├── AchievementGrid.tsx
+│   │       └── ContributionTimeline.tsx
+│   │
+│   ├── hooks/
+│   │   ├── useContributor.ts
+│   │   ├── useRepoAnalysis.ts
+│   │   ├── useQuests.ts
+│   │   ├── useIssueExplain.ts
+│   │   ├── useXPAnimation.ts
+│   │   ├── useToast.ts
+│   │   └── useMapInteraction.ts
+│   │
+│   ├── store/
+│   │   ├── appStore.ts            # Zustand root store
+│   │   ├── sessionSlice.ts
+│   │   ├── xpSlice.ts
+│   │   └── mapSlice.ts
+│   │
+│   ├── lib/
+│   │   ├── api.ts                 # Axios instance + interceptors
+│   │   ├── queryClient.ts         # React Query client config
+│   │   ├── auth.ts                # JWT cookie helpers
+│   │   └── utils.ts
+│   │
+│   ├── types/
+│   │   ├── contributor.ts
+│   │   ├── quest.ts
+│   │   ├── repository.ts
+│   │   ├── issue.ts
+│   │   ├── guild.ts
+│   │   ├── academy.ts
+│   │   └── api.ts
+│   │
+│   └── styles/
+│       ├── globals.css            # CSS custom properties + base
+│       └── animations.css         # Framer Motion variants as CSS
+│
+├── tailwind.config.ts
+├── next.config.ts
+├── tsconfig.json
+└── package.json
+```
+
+---
+
+## 14. Security Design
+
+### 14.1 Authentication
+
+- GitHub OAuth 2.0 with PKCE flow
+- JWT tokens: RS256 signed, 30-day expiry, stored in **HttpOnly + Secure + SameSite=Strict** cookie
+- Refresh token rotation: new refresh token issued on each use
+- JWT never exposed to `localStorage` or accessible via JavaScript
+
+### 14.2 Authorization
+
+- All API routes protected by JWT middleware (except `/auth/`, public profile `GET /contributors/{username}`)
+- Rate limiting: 60 requests/minute per contributor (Redis sliding window)
+- RBAC: `contributor`, `moderator`, `admin` roles; enforced at service layer
+
+### 14.3 Input Validation
+
+- All API inputs validated with Pydantic models (FastAPI)
+- GitHub repo URL validated against regex `^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`
+- PR URL validated against `^https://github\.com/.+/pull/\d+$`
+- All text inputs sanitized server-side before persistence
+- SQL injection prevented via SQLAlchemy ORM parameterized queries
+
+### 14.4 Webhook Security
+
+- GitHub webhook payloads verified with HMAC-SHA256 (`X-Hub-Signature-256` header)
+- Webhook secret stored in environment variable, never in code
+
+### 14.5 AI Prompt Security
+
+- User-supplied text (issue body, repo description) is sanitized before injection into AI prompts
+- Prompt injection mitigations: system role instructions prepended, user content wrapped in delimiters
+- AI responses treated as untrusted content, parsed with strict schemas before display
+
+---
+
+## 15. Testing Strategy
+
+### 15.1 Frontend
+
+| Type | Tool | Coverage Target |
+|------|------|----------------|
+| Unit tests | Vitest | Components, hooks, utils |
+| Integration tests | Testing Library | User interaction flows |
+| E2E tests | Playwright | Critical user journeys |
+
+Critical E2E paths:
+1. GitHub OAuth → Onboarding → Dashboard
+2. Repository URL → Analysis → Issue Explainer → Quest Start
+3. Quest complete → XP animation → Achievement unlock
+
+### 15.2 Backend
+
+| Type | Tool | Coverage Target |
+|------|------|----------------|
+| Unit tests | pytest | Service logic, utilities |
+| Integration tests | pytest + TestClient | API route handlers |
+| Property-based tests | Hypothesis | XP calculation, level formula, score normalization |
+
+### 15.3 Property-Based Tests
+
+```python
+# XP Calculation Properties
+# 1. XP is always non-negative
+# 2. Level is a monotonically non-decreasing function of XP
+# 3. Completing any valid action increases total_xp
+# 4. Beginner Friendliness Score is always in [0, 100]
+# 5. Streak resets to 0 after 48h inactivity, never below 0
+```
+
+---
+
+## 16. Deployment Architecture
+
+### 16.1 Production Stack
+
+```
+[Vercel CDN]  ← Next.js frontend (edge runtime, ISR)
+      ↓
+[Railway / Render]
+  ├── FastAPI API (uvicorn, 2+ workers)
+  ├── Celery Worker (2+ instances)
+  └── Celery Beat (1 instance — scheduled tasks)
+      ↓
+[PostgreSQL]  (Railway managed or Supabase)
+[Redis]       (Railway Redis or Upstash)
+[AWS S3]      (certificate assets, avatars)
+```
+
+### 16.2 Environment Variables
+
+```bash
+# Auth
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GITHUB_WEBHOOK_SECRET=
+JWT_PRIVATE_KEY=          # RS256 PEM
+JWT_PUBLIC_KEY=
+
+# Database
+DATABASE_URL=postgresql+asyncpg://...
+REDIS_URL=redis://...
+
+# AI
+GEMINI_API_KEY=
+
+# Storage
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_S3_BUCKET=
+
+# App
+NEXT_PUBLIC_API_BASE_URL=
+ALLOWED_ORIGINS=
+```
+
+### 16.3 Docker Compose (Development)
+
+```yaml
+services:
+  api:
+    build: ./backend
+    ports: ["8000:8000"]
+    depends_on: [postgres, redis]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres/contribquest
+      REDIS_URL: redis://redis:6379
+
+  worker:
+    build: ./backend
+    command: celery -A app.celery_app worker --loglevel=info
+    depends_on: [postgres, redis]
+
+  beat:
+    build: ./backend
+    command: celery -A app.celery_app beat --loglevel=info
+    depends_on: [redis]
+
+  frontend:
+    build: ./frontend
+    ports: ["3000:3000"]
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: contribquest
+      POSTGRES_PASSWORD: postgres
+
+  redis:
+    image: redis:7-alpine
+```
+
+---
+
+## 17. Correctness Properties
+
+The following properties must hold throughout the system. They are encoded as property-based tests using **Hypothesis** (backend) and **fast-check** (frontend).
+
+### Property 1: XP Non-Negativity
+**Validates: Requirements 2.2, 8.4**  
+For any sequence of valid contributor actions, `contributor.total_xp` is always ≥ 0.
+
+```python
+@given(actions=st.lists(
+    st.sampled_from(['lesson_complete','repo_explore','issue_solve','pr_submit','pr_merged','community_help']),
+    min_size=0, max_size=100
+))
+def test_xp_never_negative(actions):
+    xp = 0
+    for action in actions:
+        xp += XP_AWARDS[action]
+    assert xp >= 0
+```
+
+### Property 2: Level Monotonicity
+**Validates: Requirements 2.2**  
+For any two XP values `a ≤ b`, `level(a) ≤ level(b)`. Gaining XP never decreases level.
+
+```python
+@given(xp_a=st.integers(min_value=0, max_value=1_000_000),
+       delta=st.integers(min_value=0, max_value=10_000))
+def test_level_monotone(xp_a, delta):
+    xp_b = xp_a + delta
+    assert calculate_level(xp_a) <= calculate_level(xp_b)
+```
+
+### Property 3: Beginner Score Bounded
+**Validates: Requirement 3.4**  
+The composite Beginner Friendliness Score is always in the integer range [0, 100].
+
+```python
+@given(
+    doc_score=st.floats(min_value=0, max_value=100),
+    label_coverage=st.floats(min_value=0, max_value=100),
+    complexity=st.floats(min_value=0, max_value=100),
+    community=st.floats(min_value=0, max_value=100),
+    setup=st.floats(min_value=0, max_value=100)
+)
+def test_beginner_score_bounded(doc_score, label_coverage, complexity, community, setup):
+    score = calculate_beginner_score(doc_score, label_coverage, complexity, community, setup)
+    assert 0 <= score <= 100
+```
+
+### Property 4: Streak Reset Invariant
+**Validates: Requirement 8.8, 8.9**  
+After 48 hours with no completed daily challenge, streak is exactly 0. After completing ≥1 daily challenge, streak is ≥ 1.
+
+### Property 5: Quest XP Award Consistency
+**Validates: Requirement 8.4**  
+When a quest transitions to `complete`, the XP awarded to the contributor equals exactly the quest's `xp_reward` value — no more, no less.
+
+### Property 6: Achievement Unlock Idempotency
+**Validates: Requirement 9.2**  
+Triggering the same achievement condition multiple times for the same contributor results in exactly one `ContributorAchievement` record. The system is idempotent on achievement unlocks.
+
+### Property 7: Cache-Served Report Equivalence
+**Validates: NFR-1.3, Requirement 3.8**  
+The RepositoryIntelligenceReport served from Redis cache is byte-for-byte equal to the version stored in PostgreSQL for the same `(owner, repo)` pair at the time of caching.
+
+### Property 8: Rate Limit Enforcement
+**Validates: NFR-2.4**  
+For any authenticated contributor making N requests in a 60-second window where N > 60, the (N+1)th request returns HTTP 429 with a `Retry-After` header.
+
+---
+
+*Document version 1.0 — ContribQuest Platform*
