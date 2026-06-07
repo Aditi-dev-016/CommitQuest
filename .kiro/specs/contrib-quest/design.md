@@ -2090,17 +2090,31 @@ services:
 
 ## 17. Correctness Properties
 
-The following properties must hold throughout the system. They are encoded as property-based tests using **Hypothesis** (backend) and **fast-check** (frontend).
+*A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
-### Property 1: XP Non-Negativity
-**Validates: Requirements 2.2, 8.4**  
-For any sequence of valid contributor actions, `contributor.total_xp` is always ≥ 0.
+Property-based tests are implemented using **Hypothesis** (backend/Python) and **fast-check** (frontend/TypeScript). Each test runs a minimum of **100 iterations** with randomized inputs. Every property maps directly to one or more acceptance criteria.
+
+---
+
+### 17.1 XP and Leveling Properties
+
+#### Property 1: XP Non-Negativity Invariant
+
+*For any* sequence of valid contributor actions (lesson completions, repo explorations, PR submissions, community help), the contributor's cumulative `total_xp` is always ≥ 0.
+
+**Validates: Requirements 2.2, 8.4, 3.9, 7.5**
 
 ```python
+# Feature: contrib-quest, Property 1: XP non-negativity
+from hypothesis import given, settings
+import hypothesis.strategies as st
+from app.services.gamification.service import XP_AWARDS
+
 @given(actions=st.lists(
-    st.sampled_from(['lesson_complete','repo_explore','issue_solve','pr_submit','pr_merged','community_help']),
-    min_size=0, max_size=100
+    st.sampled_from(list(XP_AWARDS.keys())),
+    min_size=0, max_size=200
 ))
+@settings(max_examples=500)
 def test_xp_never_negative(actions):
     xp = 0
     for action in actions:
@@ -2108,55 +2122,486 @@ def test_xp_never_negative(actions):
     assert xp >= 0
 ```
 
-### Property 2: Level Monotonicity
-**Validates: Requirements 2.2**  
-For any two XP values `a ≤ b`, `level(a) ≤ level(b)`. Gaining XP never decreases level.
+---
+
+#### Property 2: Level Monotonicity
+
+*For any* two XP totals `a` and `b` where `a ≤ b`, `level(a) ≤ level(b)`. Gaining XP must never decrease a contributor's level.
+
+**Validates: Requirement 2.2**
 
 ```python
-@given(xp_a=st.integers(min_value=0, max_value=1_000_000),
-       delta=st.integers(min_value=0, max_value=10_000))
+# Feature: contrib-quest, Property 2: Level monotonicity
+@given(
+    xp_a=st.integers(min_value=0, max_value=1_000_000),
+    delta=st.integers(min_value=0, max_value=50_000)
+)
+@settings(max_examples=500)
 def test_level_monotone(xp_a, delta):
     xp_b = xp_a + delta
     assert calculate_level(xp_a) <= calculate_level(xp_b)
 ```
 
-### Property 3: Beginner Score Bounded
-**Validates: Requirement 3.4**  
-The composite Beginner Friendliness Score is always in the integer range [0, 100].
+---
+
+#### Property 3: XP Progress Fraction Bounded
+
+*For any* XP value, the fractional progress toward the next level is always in [0.0, 1.0). A contributor can never appear to have "more than 100%" progress or negative progress.
+
+**Validates: Requirement 2.2**
 
 ```python
-@given(
-    doc_score=st.floats(min_value=0, max_value=100),
-    label_coverage=st.floats(min_value=0, max_value=100),
-    complexity=st.floats(min_value=0, max_value=100),
-    community=st.floats(min_value=0, max_value=100),
-    setup=st.floats(min_value=0, max_value=100)
-)
-def test_beginner_score_bounded(doc_score, label_coverage, complexity, community, setup):
-    score = calculate_beginner_score(doc_score, label_coverage, complexity, community, setup)
-    assert 0 <= score <= 100
+# Feature: contrib-quest, Property 3: XP progress fraction bounded
+@given(xp=st.integers(min_value=0, max_value=10_000_000))
+@settings(max_examples=500)
+def test_xp_progress_fraction_bounded(xp):
+    fraction = calculate_level_progress_fraction(xp)
+    assert 0.0 <= fraction < 1.0
 ```
-
-### Property 4: Streak Reset Invariant
-**Validates: Requirement 8.8, 8.9**  
-After 48 hours with no completed daily challenge, streak is exactly 0. After completing ≥1 daily challenge, streak is ≥ 1.
-
-### Property 5: Quest XP Award Consistency
-**Validates: Requirement 8.4**  
-When a quest transitions to `complete`, the XP awarded to the contributor equals exactly the quest's `xp_reward` value — no more, no less.
-
-### Property 6: Achievement Unlock Idempotency
-**Validates: Requirement 9.2**  
-Triggering the same achievement condition multiple times for the same contributor results in exactly one `ContributorAchievement` record. The system is idempotent on achievement unlocks.
-
-### Property 7: Cache-Served Report Equivalence
-**Validates: NFR-1.3, Requirement 3.8**  
-The RepositoryIntelligenceReport served from Redis cache is byte-for-byte equal to the version stored in PostgreSQL for the same `(owner, repo)` pair at the time of caching.
-
-### Property 8: Rate Limit Enforcement
-**Validates: NFR-2.4**  
-For any authenticated contributor making N requests in a 60-second window where N > 60, the (N+1)th request returns HTTP 429 with a `Retry-After` header.
 
 ---
 
-*Document version 1.0 — ContribQuest Platform*
+### 17.2 Streak Logic Properties
+
+#### Property 4: Streak State Machine
+
+*For any* contributor streak value and any sequence of daily challenge completion events with associated timestamps, the streak value obeys these two rules simultaneously:
+- Completing all daily challenges on a given day increments the streak by exactly 1
+- Any gap of ≥ 48 hours between daily challenge completions resets the streak to exactly 0
+
+**Validates: Requirements 8.8, 8.9**
+
+```python
+# Feature: contrib-quest, Property 4: Streak state machine
+from datetime import timedelta
+
+@given(
+    initial_streak=st.integers(min_value=0, max_value=1000),
+    gap_hours=st.integers(min_value=0, max_value=120)
+)
+@settings(max_examples=500)
+def test_streak_state_machine(initial_streak, gap_hours):
+    streak = initial_streak
+    last_completion = datetime.utcnow()
+
+    # Simulate completing all daily challenges today → streak +1
+    streak = update_streak(streak, last_completion, completed_all_today=True)
+    assert streak == initial_streak + 1
+
+    # Simulate a gap
+    new_time = last_completion + timedelta(hours=gap_hours)
+    streak = update_streak(streak, new_time, completed_all_today=False)
+
+    if gap_hours >= 48:
+        assert streak == 0
+    else:
+        assert streak >= 0  # no reset, streak preserved
+```
+
+---
+
+#### Property 5: Streak Non-Negative Floor
+
+*For any* streak value and any combination of inactivity periods, the streak count is always ≥ 0 and never wraps below zero.
+
+**Validates: Requirements 8.8, 8.9**
+
+```python
+# Feature: contrib-quest, Property 5: Streak non-negative floor
+@given(
+    initial_streak=st.integers(min_value=0, max_value=10000),
+    resets=st.integers(min_value=1, max_value=20)
+)
+@settings(max_examples=300)
+def test_streak_never_negative(initial_streak, resets):
+    streak = initial_streak
+    for _ in range(resets):
+        streak = reset_streak(streak)
+    assert streak == 0
+```
+
+---
+
+### 17.3 Quest State Machine Properties
+
+#### Property 6: Quest XP Award Exactness
+
+*For any* quest with any `xp_reward` value, when the quest transitions to `complete` status, the XP added to the contributor's `total_xp` equals exactly `quest.xp_reward` — never more, never less.
+
+**Validates: Requirement 8.4**
+
+```python
+# Feature: contrib-quest, Property 6: Quest XP award exactness
+@given(
+    initial_xp=st.integers(min_value=0, max_value=1_000_000),
+    xp_reward=st.integers(min_value=1, max_value=10_000)
+)
+@settings(max_examples=500)
+def test_quest_xp_award_exact(initial_xp, xp_reward, db_session):
+    contributor = make_contributor(total_xp=initial_xp)
+    quest = make_quest(xp_reward=xp_reward)
+    complete_quest(contributor, quest, db_session)
+    assert contributor.total_xp == initial_xp + xp_reward
+```
+
+---
+
+#### Property 7: Quest Prerequisite Locking Invariant
+
+*For any* quest graph, if quest B declares quest A as its prerequisite, and A's status is anything other than `complete`, then B's computed status must be `locked`. The locked state is a strict invariant of the prerequisite relationship.
+
+**Validates: Requirement 8.6**
+
+```python
+# Feature: contrib-quest, Property 7: Quest prerequisite locking
+@given(
+    prerequisite_status=st.sampled_from(['locked','available','active','submitted','failed'])
+)
+@settings(max_examples=100)
+def test_quest_prerequisite_locking(prerequisite_status, db_session):
+    prereq = make_quest(status=prerequisite_status)
+    dependent = make_quest(prerequisite_id=prereq.id)
+
+    computed_status = compute_quest_status(dependent, contributor_id=TEST_CONTRIBUTOR_ID)
+
+    # Dependent must be locked unless prerequisite is complete
+    if prerequisite_status != 'complete':
+        assert computed_status == 'locked'
+```
+
+---
+
+#### Property 8: Quest Status Transition Validity
+
+*For any* quest progress record, the status transitions follow a valid directed graph: `locked → available → active → (submitted | complete | failed)`. No status can transition backward (e.g., `complete → active` is forbidden).
+
+**Validates: Requirements 8.4, 8.6, 7.5**
+
+```python
+# Feature: contrib-quest, Property 8: Quest status transition validity
+VALID_TRANSITIONS = {
+    'locked':    {'available'},
+    'available': {'active'},
+    'active':    {'submitted', 'complete', 'failed'},
+    'submitted': {'complete', 'failed'},
+    'complete':  set(),   # terminal
+    'failed':    {'available'},  # retry allowed
+}
+
+@given(
+    from_status=st.sampled_from(list(VALID_TRANSITIONS.keys())),
+    to_status=st.sampled_from(['locked','available','active','submitted','complete','failed'])
+)
+@settings(max_examples=300)
+def test_quest_transition_validity(from_status, to_status):
+    is_valid_transition = to_status in VALID_TRANSITIONS[from_status]
+    result = attempt_quest_transition(from_status, to_status)
+
+    if is_valid_transition:
+        assert result.success is True
+    else:
+        assert result.success is False
+        assert result.error_code == 'INVALID_TRANSITION'
+```
+
+---
+
+### 17.4 Achievement Unlock Properties
+
+#### Property 9: Achievement Unlock Idempotency
+
+*For any* contributor and any achievement, triggering the unlock condition N times (N ≥ 1) results in exactly one `contributor_achievements` row. The achievement engine is fully idempotent — repeated triggers never create duplicate records or award XP more than once.
+
+**Validates: Requirement 9.2**
+
+```python
+# Feature: contrib-quest, Property 9: Achievement unlock idempotency
+@given(trigger_count=st.integers(min_value=1, max_value=50))
+@settings(max_examples=200)
+def test_achievement_unlock_idempotent(trigger_count, db_session):
+    contributor = make_contributor()
+    achievement = make_achievement(unlock_condition={"type": "pr_merged_count", "threshold": 1})
+
+    for _ in range(trigger_count):
+        check_and_unlock_achievement(contributor, achievement, db_session)
+
+    unlock_count = db_session.query(ContributorAchievement).filter_by(
+        contributor_id=contributor.id,
+        achievement_id=achievement.id
+    ).count()
+
+    assert unlock_count == 1
+```
+
+---
+
+#### Property 10: Achievement XP Awarded At Most Once
+
+*For any* contributor and achievement, the XP bonus attached to an achievement is added to `total_xp` exactly once, regardless of how many times the unlock trigger fires.
+
+**Validates: Requirements 9.2, 2.2**
+
+```python
+# Feature: contrib-quest, Property 10: Achievement XP awarded once
+@given(
+    initial_xp=st.integers(min_value=0, max_value=500_000),
+    achievement_xp=st.integers(min_value=0, max_value=1000),
+    trigger_count=st.integers(min_value=1, max_value=20)
+)
+@settings(max_examples=300)
+def test_achievement_xp_awarded_once(initial_xp, achievement_xp, trigger_count, db_session):
+    contributor = make_contributor(total_xp=initial_xp)
+    achievement = make_achievement(xp_reward=achievement_xp)
+
+    for _ in range(trigger_count):
+        check_and_unlock_achievement(contributor, achievement, db_session)
+
+    assert contributor.total_xp == initial_xp + achievement_xp
+```
+
+---
+
+### 17.5 Repository Analysis Cache Properties
+
+#### Property 11: Cache Round-Trip Equivalence
+
+*For any* `RepositoryIntelligenceReport` object, serializing it to JSON for Redis and then deserializing it produces an object that is structurally equal to the original. The cache is a transparent store — no data is lost or mutated in transit.
+
+**Validates: Requirements 3.8, NFR-1.3**
+
+```python
+# Feature: contrib-quest, Property 11: Cache round-trip equivalence
+from hypothesis import given, settings
+import hypothesis.strategies as st
+from app.utils.cache import serialize_report, deserialize_report
+from tests.factories import repo_intelligence_report_strategy
+
+@given(report=repo_intelligence_report_strategy())
+@settings(max_examples=300)
+def test_cache_round_trip(report):
+    serialized = serialize_report(report)
+    deserialized = deserialize_report(serialized)
+    assert deserialized == report
+```
+
+---
+
+#### Property 12: Cache TTL Within Bounds
+
+*For any* repository analysis result stored in Redis, the time-to-live (TTL) set at insertion is ≤ 86400 seconds (24 hours) and > 0 seconds. No cache entry is inserted with an infinite or zero TTL.
+
+**Validates: Requirement 3.8**
+
+```python
+# Feature: contrib-quest, Property 12: Cache TTL within bounds
+@given(
+    owner=st.text(min_size=1, max_size=64, alphabet=st.characters(whitelist_categories=('Lu','Ll','Nd'))),
+    repo=st.text(min_size=1, max_size=128, alphabet=st.characters(whitelist_categories=('Lu','Ll','Nd')))
+)
+@settings(max_examples=200)
+def test_cache_ttl_bounded(owner, repo, redis_client):
+    report = make_mock_report(owner=owner, repo=repo)
+    store_report_in_cache(redis_client, owner, repo, report)
+    ttl = redis_client.ttl(f"repo_analysis:{owner}:{repo}")
+    assert 0 < ttl <= 86400
+```
+
+---
+
+### 17.6 Issue Filter Response Time Property
+
+#### Property 13: Issue Filter Latency Invariant
+
+*For any* combination of valid filter parameters (difficulty, language, repository, label) applied to a dataset of up to 10,000 issues, the `filter_issues()` function returns within 300ms. This validates that filter performance degrades gracefully with data volume.
+
+**Validates: Requirement 5.3, NFR-1.2**
+
+```python
+# Feature: contrib-quest, Property 13: Issue filter latency
+import time
+
+@given(
+    filters=st.fixed_dictionaries({
+        'difficulty': st.one_of(st.none(), st.sampled_from(['easy','medium','hard'])),
+        'language':   st.one_of(st.none(), st.text(min_size=1, max_size=32)),
+        'label':      st.one_of(st.none(), st.sampled_from(['good first issue','help wanted','documentation'])),
+    }),
+    issue_count=st.integers(min_value=0, max_value=10_000)
+)
+@settings(max_examples=200, deadline=None)
+def test_issue_filter_latency(filters, issue_count):
+    issues = generate_mock_issues(issue_count)
+    start = time.monotonic()
+    filter_issues(issues, **filters)
+    elapsed_ms = (time.monotonic() - start) * 1000
+    assert elapsed_ms < 300
+```
+
+---
+
+### 17.7 JWT and Auth Token Lifecycle Properties
+
+#### Property 14: JWT Claims Round-Trip
+
+*For any* valid contributor claims payload, signing the payload into a JWT and then verifying and decoding it produces a claims dict that is equal to the original. The JWT encode → decode cycle is lossless.
+
+**Validates: Requirements 1.3, 1.7**
+
+```python
+# Feature: contrib-quest, Property 14: JWT claims round-trip
+from tests.factories import contributor_claims_strategy
+from app.utils.security import sign_jwt, verify_jwt
+
+@given(claims=contributor_claims_strategy())
+@settings(max_examples=300)
+def test_jwt_round_trip(claims):
+    token = sign_jwt(claims)
+    decoded = verify_jwt(token)
+    # All original fields must survive the round trip
+    for key, value in claims.items():
+        assert decoded[key] == value
+```
+
+---
+
+#### Property 15: JWT Expiry Enforcement
+
+*For any* JWT token whose `exp` claim is strictly less than the current timestamp, `verify_jwt()` must raise an `ExpiredTokenError` and must never return a valid claims dict. Expired tokens are unconditionally rejected.
+
+**Validates: Requirements 1.9, NFR-2.1**
+
+```python
+# Feature: contrib-quest, Property 15: JWT expiry enforcement
+from freezegun import freeze_time
+
+@given(
+    seconds_in_past=st.integers(min_value=1, max_value=60 * 60 * 24 * 365)
+)
+@settings(max_examples=300)
+def test_expired_jwt_rejected(seconds_in_past):
+    issue_time = datetime.utcnow() - timedelta(seconds=seconds_in_past + 1)
+    with freeze_time(issue_time):
+        token = sign_jwt(make_claims(), expiry_seconds=1)
+
+    # Token was issued and expired in the past; verifying now must fail
+    with pytest.raises(ExpiredTokenError):
+        verify_jwt(token)
+```
+
+---
+
+#### Property 16: JWT 30-Day Expiry Invariant
+
+*For any* token issued by the Auth Service, the `exp` claim equals the issuance time plus exactly 30 days (2,592,000 seconds). Tokens issued at any point in time must have this consistent lifetime.
+
+**Validates: Requirement 1.7**
+
+```python
+# Feature: contrib-quest, Property 16: JWT 30-day expiry invariant
+THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60
+
+@given(
+    issue_offset_hours=st.integers(min_value=0, max_value=24 * 365)
+)
+@settings(max_examples=300)
+def test_jwt_thirty_day_expiry(issue_offset_hours):
+    issue_time = datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(hours=issue_offset_hours)
+    with freeze_time(issue_time):
+        token = issue_contributor_token(make_claims())
+        decoded = decode_jwt_unverified(token)
+
+    expected_exp = int(issue_time.timestamp()) + THIRTY_DAYS_SECONDS
+    assert decoded['exp'] == expected_exp
+```
+
+---
+
+### 17.8 Beginner Friendliness Score Property
+
+#### Property 17: Beginner Score Bounded and Composed Correctly
+
+*For any* combination of five sub-score inputs each in [0, 100], the composite `calculate_beginner_score()` output is always an integer in [0, 100]. Sub-scores at extreme values (all 0 or all 100) must produce outputs at the corresponding boundary.
+
+**Validates: Requirement 3.4**
+
+```python
+# Feature: contrib-quest, Property 17: Beginner score bounded
+@given(
+    doc_score=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
+    label_coverage=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
+    complexity=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
+    community=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
+    setup=st.floats(min_value=0.0, max_value=100.0, allow_nan=False)
+)
+@settings(max_examples=500)
+def test_beginner_score_bounded(doc_score, label_coverage, complexity, community, setup):
+    score = calculate_beginner_score(doc_score, label_coverage, complexity, community, setup)
+    assert isinstance(score, int)
+    assert 0 <= score <= 100
+```
+
+---
+
+### 17.9 Rate Limiting Property
+
+#### Property 18: Rate Limit Threshold Enforcement
+
+*For any* authenticated contributor making requests, once they have consumed exactly 60 requests within a sliding 60-second window, the next (61st) request must receive HTTP 429 with a `Retry-After` header present. No contributor can exceed 60 requests/minute regardless of request timing distribution.
+
+**Validates: NFR-2.4**
+
+```python
+# Feature: contrib-quest, Property 18: Rate limit enforcement
+@given(
+    burst_size=st.integers(min_value=61, max_value=120)
+)
+@settings(max_examples=100)
+def test_rate_limit_enforced(burst_size, test_client, redis_client):
+    contributor_id = str(uuid.uuid4())
+    headers = make_auth_headers(contributor_id)
+
+    responses = []
+    for _ in range(burst_size):
+        r = test_client.get("/contributors/me", headers=headers)
+        responses.append(r.status_code)
+
+    # At least one response in the burst must be 429
+    assert 429 in responses
+
+    # The first 60 must all be 200
+    assert all(s == 200 for s in responses[:60])
+
+    # Response 61 onwards must include Retry-After
+    rate_limited = [r for r in test_client.responses if r.status_code == 429]
+    for r in rate_limited:
+        assert 'Retry-After' in r.headers
+```
+
+---
+
+### 17.10 Summary Table
+
+| # | Property | Pattern | Validates |
+|---|----------|---------|-----------|
+| 1 | XP Non-Negativity | Invariant | Req 2.2, 8.4 |
+| 2 | Level Monotonicity | Metamorphic | Req 2.2 |
+| 3 | XP Progress Fraction Bounded | Invariant | Req 2.2 |
+| 4 | Streak State Machine | State machine | Req 8.8, 8.9 |
+| 5 | Streak Non-Negative Floor | Invariant | Req 8.8, 8.9 |
+| 6 | Quest XP Award Exactness | Invariant | Req 8.4 |
+| 7 | Quest Prerequisite Locking | State machine | Req 8.6 |
+| 8 | Quest Status Transition Validity | State machine | Req 8.4, 8.6, 7.5 |
+| 9 | Achievement Unlock Idempotency | Idempotence | Req 9.2 |
+| 10 | Achievement XP Awarded Once | Idempotence | Req 9.2, 2.2 |
+| 11 | Cache Round-Trip Equivalence | Round-trip | Req 3.8, NFR-1.3 |
+| 12 | Cache TTL Within Bounds | Invariant | Req 3.8 |
+| 13 | Issue Filter Latency | Performance invariant | Req 5.3, NFR-1.2 |
+| 14 | JWT Claims Round-Trip | Round-trip | Req 1.3, 1.7 |
+| 15 | JWT Expiry Enforcement | Error condition | Req 1.9, NFR-2.1 |
+| 16 | JWT 30-Day Expiry Invariant | Invariant | Req 1.7 |
+| 17 | Beginner Score Bounded | Invariant | Req 3.4 |
+| 18 | Rate Limit Threshold | Invariant | NFR-2.4 |
+
+---
+
+*Document version 1.1 — ContribQuest Platform*
