@@ -49,6 +49,12 @@ backend/.venv/
 !**/.env.local.example
 !**/.env*.example
 
+# Firebase Service Account Credentials
+*firebase-service-account*.json
+*service-account*.json
+*firebase-key*.json
+firebase-adminsdk*.json
+
 # Next.js / Frontend builds & artifacts
 .next/
 frontend/.next/
