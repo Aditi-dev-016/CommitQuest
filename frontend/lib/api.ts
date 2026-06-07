@@ -52,6 +52,14 @@ async function apiFetch<T>(
     ...options,
   })
 
+  if (res.status === 401) {
+    await signOut(firebaseAuth);
+    if (typeof window !== 'undefined') {
+      window.location.href = '/login';
+    }
+    throw new Error('Session expired. Please log in again.');
+  }
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body?.error?.message ?? `API error ${res.status}`)
