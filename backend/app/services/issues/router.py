@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from app.services.auth.dependencies import get_current_contributor
-from app.firebase import get_firestore_client
+from app.core.firebase import get_firestore_client
 from app.integrations.ai.gemini_client import explain_issue as ai_explain
 
 router = APIRouter()
